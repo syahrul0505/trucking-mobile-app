@@ -1,0 +1,62 @@
+name: Build Flutter APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.3'
+          channel: 'stable'
+          cache: true
+
+      - name: Create Flutter Project Skeleton if needed
+        run: |
+          if [ ! -f "android/build.gradle" ]; then
+            echo "Generating Flutter project wrapper..."
+            flutter create . --org com.precision --project-name trucking_mobile --platforms android
+          fi
+
+      - name: Get Dependencies
+        run: flutter pub get
+
+      - name: Build APK Release
+        run: flutter build apk --release
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: precision-trucking-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Create GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+        with:
+          tag_name: v1.0.0
+          name: Precision Trucking Mobile v1.0.0
+          body: |
+            ## 📱 Precision Trucking Mobile (Release APK)
+            - Live GPS Driver Tracking Bridge
+            - Mobile Struk & Nota Camera Upload
+            - Auto WhatsApp & Google Maps Link Routing
+            - Zero CLS Table Skeleton Loading
+          files: build/app/outputs/flutter-apk/app-release.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
