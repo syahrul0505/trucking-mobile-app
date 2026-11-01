@@ -276,7 +276,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
                               vertical: 12,
                             ),
                             shape: RoundedRectangleBorder(
-                              border-radius: BorderRadius.circular(10),
+                              borderRadius: BorderRadius.circular(10),
                             ),
                           ),
                         ),
