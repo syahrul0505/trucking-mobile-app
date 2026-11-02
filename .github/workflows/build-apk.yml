@@ -31,9 +31,15 @@ jobs:
       - name: Create Flutter Project Skeleton if needed
         run: |
           echo "Generating clean standard Flutter Android runner..."
+          mkdir -p /tmp/clean_flutter
+          cd /tmp/clean_flutter
           flutter create --org com.precision --project-name trucking_mobile --platforms android .
           
-          # Ensure subprojects have compileSdkVersion 34 for geolocator
+          # Copy standard android folder
+          cd $GITHUB_WORKSPACE
+          cp -r /tmp/clean_flutter/android .
+          
+          # Inject compileSdkVersion 34 into root android/build.gradle
           cat << 'EOF' >> android/build.gradle
           subprojects {
               afterEvaluate { project ->
@@ -45,6 +51,9 @@ jobs:
               }
           }
           EOF
+
+          # Ensure AndroidManifest has GPS permissions
+          sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"\/>\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"\/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"\/>' android/app/src/main/AndroidManifest.xml
 
       - name: Get Dependencies
         run: flutter pub get
