@@ -51,14 +51,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: success()
         with:
-          tag_name: v1.0.0
-          name: Precision Trucking Mobile v1.0.0
+          tag_name: v1.1.0
+          name: Precision Trucking Driver GPS v1.1.0
           body: |
-            ## 📱 Precision Trucking Mobile (Release APK)
-            - Live GPS Driver Tracking Bridge
-            - Mobile Struk & Nota Camera Upload
-            - Auto WhatsApp & Google Maps Link Routing
-            - Zero CLS Table Skeleton Loading
+            ## 🚚 Precision Trucking Driver Companion (Native App)
+            - **No WebView**: 100% Native Mobile Flutter UI (Dark Futuristic Bento Design)
+            - **Driver Login**: Direct credential authentication via Laravel Sanctum REST API
+            - **GPS Live Tracking**: Native OpenStreetMap tiles, live telemetry (Speed, Battery, Ping Counter)
+            - **High-Accuracy Background GPS**: Continuous hardware sensor stream
           files: build/app/outputs/flutter-apk/app-release.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

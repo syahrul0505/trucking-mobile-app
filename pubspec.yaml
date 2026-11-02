@@ -1,7 +1,7 @@
 name: trucking_mobile
-description: "Precision Trucking & Driver Tracking Mobile App (WebView + High-Accuracy GPS)"
+description: "Precision Trucking Driver App - Dedicated Native GPS & Trip Tracker"
 publish_to: "none"
-version: 1.0.0+1
+version: 1.1.0+2
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
@@ -9,14 +9,17 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  webview_flutter: ^4.10.0
-  webview_flutter_android: ^4.1.0
-  permission_handler: ^11.3.1
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+  geolocator: ^13.0.2
+  http: ^1.2.2
+  shared_preferences: ^2.3.2
+  battery_plus: ^6.1.1
   flutter_spinkit: ^5.2.1
-  flutter_secure_storage: ^9.2.2
-  connectivity_plus: ^6.1.1
+  google_fonts: ^6.2.1
+  intl: ^0.19.0
   url_launcher: ^6.3.1
-  fluttertoast: ^8.2.8
+  permission_handler: ^11.3.1
 
 dev_dependencies:
   flutter_test:
