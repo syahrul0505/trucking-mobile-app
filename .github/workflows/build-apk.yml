@@ -30,10 +30,21 @@ jobs:
 
       - name: Create Flutter Project Skeleton if needed
         run: |
-          if [ ! -f "android/build.gradle" ]; then
-            echo "Generating Flutter project wrapper..."
-            flutter create . --org com.precision --project-name trucking_mobile --platforms android
-          fi
+          echo "Generating clean standard Flutter Android runner..."
+          flutter create --org com.precision --project-name trucking_mobile --platforms android .
+          
+          # Ensure subprojects have compileSdkVersion 34 for geolocator
+          cat << 'EOF' >> android/build.gradle
+          subprojects {
+              afterEvaluate { project ->
+                  if (project.hasProperty('android')) {
+                      project.android {
+                          compileSdkVersion 34
+                      }
+                  }
+              }
+          }
+          EOF
 
       - name: Get Dependencies
         run: flutter pub get
