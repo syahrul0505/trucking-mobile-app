@@ -369,12 +369,27 @@ class AppLogo extends StatelessWidget {
     return Container(
       width: size,
       height: size,
+      padding: EdgeInsets.all(size * 0.15),
       decoration: BoxDecoration(
-        color: C.accent,
-        borderRadius: BorderRadius.circular(size * 0.3),
-        boxShadow: [BoxShadow(color: C.accent.withOpacity(0.35), blurRadius: 24, offset: const Offset(0, 8))],
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(size * 0.28),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x33000000),
+            blurRadius: 20,
+            offset: Offset(0, 8),
+          ),
+        ],
       ),
-      child: Icon(Icons.local_shipping_rounded, color: C.navy, size: size * 0.5),
+      child: Image.asset(
+        'assets/images/precision_logo.png',
+        fit: BoxFit.contain,
+        errorBuilder: (_, __, ___) => Icon(
+          Icons.local_shipping_rounded,
+          color: C.navy,
+          size: size * 0.5,
+        ),
+      ),
     );
   }
 }

@@ -40,6 +40,14 @@ jobs:
           rm -rf android
           cp -r /tmp/clean_flutter/android .
 
+          # Copy custom app icons into mipmap folders
+          echo "Installing Precision launcher icons..."
+          for d in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+            if [ -f "assets/launcher/$d/ic_launcher.png" ]; then
+              cp "assets/launcher/$d/ic_launcher.png" "android/app/src/main/res/$d/ic_launcher.png"
+            fi
+          done
+
           # Ensure AndroidManifest has GPS permissions
           sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"\/>\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"\/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"\/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"\/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"\/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"\/>' android/app/src/main/AndroidManifest.xml
 
@@ -64,14 +72,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: success()
         with:
-          tag_name: v1.2.0
-          name: Precision Trucking Driver GPS v1.2.0
+          tag_name: v1.2.1
+          name: Precision Trucking Driver GPS v1.2.1
           body: |
-            ## 🚚 Precision Trucking Driver Companion (Native App)
-            - **No WebView**: 100% Native Mobile Flutter UI (Dark Futuristic Bento Design)
-            - **Driver Login**: Direct credential authentication via Laravel Sanctum REST API
-            - **GPS Live Tracking**: Native OpenStreetMap tiles, live telemetry (Speed, Battery, Ping Counter)
-            - **High-Accuracy Background GPS**: Continuous hardware sensor stream
+            ## 🚚 Precision Trucking Driver Companion (Native App) v1.2.1
+            - **Custom Brand Icon**: Official Precision logo replaces default Flutter icon
+            - **In-App Branding**: Splash and Login screens render crisp high-res Precision emblem
+            - **No WebView**: 100% Native Mobile Flutter UI (Bento Ops Design)
+            - **Dashboard & Telemetry**: Full GPS route, speedometer, trip management
           files: build/app/outputs/flutter-apk/app-release.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
