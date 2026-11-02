@@ -260,7 +260,7 @@ class _LoginScreenState extends State<LoginScreen> {
               if (_errorMessage != null)
                 Container(
                   padding: const EdgeInsets.all(14),
-                  margin: const EdgeInsets.bottom(20),
+                  margin: const EdgeInsets.only(bottom: 20),
                   decoration: BoxDecoration(
                     color: const Color(0xFFEF4444).withOpacity(0.12),
                     borderRadius: BorderRadius.circular(12),
@@ -507,7 +507,7 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                     itemBuilder: (context, index) {
                       final item = _truckings[index];
                       return Container(
-                        margin: const EdgeInsets.bottom(14),
+                        margin: const EdgeInsets.only(bottom: 14),
                         decoration: BoxDecoration(
                           color: const Color(0xFF1E293B),
                           borderRadius: BorderRadius.circular(16),
