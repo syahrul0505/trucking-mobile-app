@@ -37,6 +37,7 @@ jobs:
           
           # Copy standard android folder
           cd $GITHUB_WORKSPACE
+          rm -rf android
           cp -r /tmp/clean_flutter/android .
 
           # Ensure AndroidManifest has GPS permissions
