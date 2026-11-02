@@ -72,13 +72,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: success()
         with:
-          tag_name: v1.2.1
-          name: Precision Trucking Driver GPS v1.2.1
+          tag_name: v1.3.0
+          name: Precision Trucking Driver GPS v1.3.0
           body: |
-            ## 🚚 Precision Trucking Driver Companion (Native App) v1.2.1
+            ## 🚚 Precision Trucking Driver Companion (Native App) v1.3.0
+            - **In-App Auto Update**: Automatic version check against server on app launch & manual check in Account tab
             - **Custom Brand Icon**: Official Precision logo replaces default Flutter icon
-            - **In-App Branding**: Splash and Login screens render crisp high-res Precision emblem
-            - **No WebView**: 100% Native Mobile Flutter UI (Bento Ops Design)
+            - **No Uninstall Needed**: Direct seamless update preserves login sessions & driver preferences
             - **Dashboard & Telemetry**: Full GPS route, speedometer, trip management
           files: build/app/outputs/flutter-apk/app-release.apk
         env:

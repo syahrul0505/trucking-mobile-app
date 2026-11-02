@@ -16,7 +16,8 @@ import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const String kAppVersion = '1.2.0';
+const String kAppVersion = '1.3.0';
+const int kAppVersionCode = 5;
 
 // ============================================================
 // DESIGN TOKENS
@@ -595,6 +596,120 @@ class _MainShellState extends State<MainShell> {
   int _index = 0;
   final _dashKey = GlobalKey<DashboardPageState>();
   final _historyKey = GlobalKey<HistoryPageState>();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkForUpdate();
+    });
+  }
+
+  Future<void> _checkForUpdate() async {
+    try {
+      final res = await http.get(
+        Uri.parse('${Api.base}/app-version'),
+        headers: {'Accept': 'application/json'},
+      ).timeout(const Duration(seconds: 10));
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        if (data is Map && data['success'] == true) {
+          final serverCode = (data['version_code'] as num?)?.toInt() ?? 0;
+          final serverVer = data['latest_version'] ?? 'Terbaru';
+          final notes = data['release_notes'] ?? 'Pembaruan aplikasi telah tersedia.';
+          final downloadUrl = data['download_url'] ?? 'https://trucking.saleslog-pro.com/PrecisionDriver.apk';
+          final forceUpdate = data['force_update'] == true;
+
+          if (serverCode > kAppVersionCode && mounted) {
+            _showUpdateDialog(
+              version: serverVer.toString(),
+              notes: notes.toString(),
+              downloadUrl: downloadUrl.toString(),
+              forceUpdate: forceUpdate,
+            );
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  void _showUpdateDialog({
+    required String version,
+    required String notes,
+    required String downloadUrl,
+    required bool forceUpdate,
+  }) {
+    showDialog(
+      context: context,
+      barrierDismissible: !forceUpdate,
+      builder: (ctx) => PopScope(
+        canPop: !forceUpdate,
+        child: AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: C.primary.withOpacity(0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.system_update_rounded, color: C.primary, size: 24),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text('Pembaruan Tersedia', style: t(17, w: FontWeight.w800)),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: C.green.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text('Versi $version', style: t(12, w: FontWeight.w800, c: C.green)),
+              ),
+              const SizedBox(height: 12),
+              Text(notes, style: t(13.5, c: C.muted, h: 1.4)),
+              const SizedBox(height: 14),
+              Text(
+                'Aplikasi akan mengunduh pembaruan. Anda tidak perlu uninstall aplikasi.',
+                style: t(11.5, w: FontWeight.w600, c: C.primary),
+              ),
+            ],
+          ),
+          actions: [
+            if (!forceUpdate)
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text('Nanti', style: t(14, w: FontWeight.w700, c: C.muted)),
+              ),
+            ElevatedButton(
+              onPressed: () async {
+                final uri = Uri.parse(downloadUrl);
+                try {
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                } catch (_) {}
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: C.primary,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              ),
+              child: Text('PERBARUI SEKARANG', style: t(14, w: FontWeight.w800, c: Colors.white)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   void _goGps(Map<String, dynamic>? trip) {
     if (trip != null) Tracker.I.select(trip);
@@ -2015,7 +2130,54 @@ class _ProfilePageState extends State<ProfilePage> {
               const Divider(color: C.border, height: 1),
               _row(Icons.alternate_email_rounded, 'Email', _email),
               const Divider(color: C.border, height: 1),
-              _row(Icons.info_outline_rounded, 'Versi Aplikasi', kAppVersion),
+              _row(Icons.info_outline_rounded, 'Versi Aplikasi', '$kAppVersion (Build $kAppVersionCode)'),
+              const Divider(color: C.border, height: 1),
+              InkWell(
+                onTap: () async {
+                  snack(context, 'Memeriksa versi terbaru...');
+                  try {
+                    final res = await http.get(
+                      Uri.parse('${Api.base}/app-version'),
+                      headers: {'Accept': 'application/json'},
+                    ).timeout(const Duration(seconds: 8));
+                    if (res.statusCode == 200) {
+                      final data = jsonDecode(res.body);
+                      final serverCode = (data['version_code'] as num?)?.toInt() ?? 0;
+                      if (serverCode > kAppVersionCode) {
+                        final uri = Uri.parse(data['download_url'] ?? 'https://trucking.saleslog-pro.com/PrecisionDriver.apk');
+                        await launchUrl(uri, mode: LaunchMode.externalApplication);
+                      } else {
+                        if (context.mounted) snack(context, 'Aplikasi sudah versi paling baru (v$kAppVersion).', color: C.green);
+                      }
+                    }
+                  } catch (_) {
+                    if (context.mounted) snack(context, 'Gagal terhubung ke server pembaruan.', color: C.red);
+                  }
+                },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(9),
+                        decoration: BoxDecoration(color: C.primary.withOpacity(0.12), borderRadius: BorderRadius.circular(12)),
+                        child: const Icon(Icons.sync_rounded, size: 20, color: C.primary),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Pembaruan Aplikasi', style: t(11.5, w: FontWeight.w600, c: C.muted)),
+                            Text('Periksa Versi Terbaru', style: t(14, w: FontWeight.w700, c: C.primary)),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.chevron_right_rounded, color: C.muted),
+                    ],
+                  ),
+                ),
+              ),
             ]),
           ),
           const SizedBox(height: 14),
