@@ -38,19 +38,6 @@ jobs:
           # Copy standard android folder
           cd $GITHUB_WORKSPACE
           cp -r /tmp/clean_flutter/android .
-          
-          # Inject compileSdkVersion 34 into root android/build.gradle
-          cat << 'EOF' >> android/build.gradle
-          subprojects {
-              afterEvaluate { project ->
-                  if (project.hasProperty('android')) {
-                      project.android {
-                          compileSdkVersion 34
-                      }
-                  }
-              }
-          }
-          EOF
 
           # Ensure AndroidManifest has GPS permissions
           sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"\/>\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"\/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"\/>' android/app/src/main/AndroidManifest.xml
