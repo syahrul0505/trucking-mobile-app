@@ -24,7 +24,7 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.3'
+          flutter-version: '3.29.0'
           channel: 'stable'
           cache: true
 
@@ -38,24 +38,6 @@ jobs:
           # Copy standard android folder
           cd $GITHUB_WORKSPACE
           cp -r /tmp/clean_flutter/android .
-
-          # Configure compileSdk 34 in android/app/build.gradle
-          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 34/g' android/app/build.gradle
-          sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 34/g' android/app/build.gradle
-          
-          # Fix geolocator compileSdk bug on Gradle 8+
-          cat << 'EOF' > android/app/fix.gradle
-          gradle.projectsEvaluated {
-              subprojects {
-                  if (it.hasProperty('android')) {
-                      it.android {
-                          compileSdkVersion 34
-                      }
-                  }
-              }
-          }
-          EOF
-          echo "apply from: 'fix.gradle'" >> android/app/build.gradle
 
           # Ensure AndroidManifest has GPS permissions
           sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"\/>\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"\/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"\/>' android/app/src/main/AndroidManifest.xml
