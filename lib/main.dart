@@ -16,8 +16,8 @@ import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const String kAppVersion = '1.3.0';
-const int kAppVersionCode = 5;
+const String kAppVersion = '1.3.1';
+const int kAppVersionCode = 6;
 
 // ============================================================
 // DESIGN TOKENS
@@ -1290,7 +1290,7 @@ class _GpsPageState extends State<GpsPage> {
   LatLng? _dest;
   LatLng? _idlePos;
   List<LatLng> _route = [];
-  List<LatLng> _history = [];
+  List<List<LatLng>> _history = [];
   double? _routeKm;
   double? _routeMin;
 
@@ -1360,16 +1360,43 @@ class _GpsPageState extends State<GpsPage> {
     });
     try {
       final d = await Api.get('/trucking/$id');
-      final pts = ((d['points'] as List?) ?? [])
-          .map((p) => LatLng(((p as Map)['lat'] as num).toDouble(), (p['lng'] as num).toDouble()))
-          .toList();
-      if (mounted && _loadedTripId == id) setState(() => _history = pts);
+      final segs = _splitSegments((d['points'] as List?) ?? []);
+      if (mounted && _loadedTripId == id) setState(() => _history = segs);
     } catch (_) {}
     _idlePos ??= await _oneShotPosition();
     await _geocode(trip);
     if (_loadedTripId != id) return;
     await _computeRoute();
     _fitAll();
+  }
+
+  /// Pecah titik GPS jadi beberapa segmen. Titik yang terpisah jauh (>1 km)
+  /// atau jeda waktu lama (>5 menit, mis. GPS dimatikan) tidak disambung
+  /// dengan garis lurus.
+  List<List<LatLng>> _splitSegments(List raw) {
+    const dist = Distance();
+    final segs = <List<LatLng>>[];
+    var cur = <LatLng>[];
+    LatLng? prev;
+    int? prevTs;
+    for (final r in raw) {
+      if (r is! Map || r['lat'] == null || r['lng'] == null) continue;
+      final p = LatLng((r['lat'] as num).toDouble(), (r['lng'] as num).toDouble());
+      final ts = (r['ts'] as num?)?.toInt();
+      if (prev != null) {
+        final gapM = dist.distance(prev, p);
+        final gapS = (ts != null && prevTs != null) ? ts - prevTs : 0;
+        if (gapM > 1000 || gapS > 300) {
+          if (cur.length > 1) segs.add(cur);
+          cur = <LatLng>[];
+        }
+      }
+      cur.add(p);
+      prev = p;
+      prevTs = ts;
+    }
+    if (cur.length > 1) segs.add(cur);
+    return segs;
   }
 
   Future<LatLng?> _oneShotPosition() async {
@@ -1447,7 +1474,7 @@ class _GpsPageState extends State<GpsPage> {
   void _fitAll() {
     if (!_mapReady || !mounted) return;
     final me = _me;
-    final pts = <LatLng>[if (me != null) me, if (_dest != null) _dest!, ..._route, ..._history];
+    final pts = <LatLng>[if (me != null) me, if (_dest != null) _dest!, ..._route, for (final s in _history) ...s];
     if (pts.isEmpty) return;
     if (pts.length == 1) {
       _map.move(pts.first, 15);
@@ -1647,7 +1674,7 @@ class _GpsPageState extends State<GpsPage> {
             PolylineLayer(polylines: [
               if (_route.length > 1)
                 Polyline(points: _route, strokeWidth: 6, color: C.primary.withOpacity(0.75), borderStrokeWidth: 2, borderColor: Colors.white),
-              if (_history.length > 1) Polyline(points: _history, strokeWidth: 4, color: C.accent),
+              for (final seg in _history) Polyline(points: seg, strokeWidth: 4, color: C.accent),
               if (trackingThis && tracker.trail.length > 1) Polyline(points: List<LatLng>.of(tracker.trail), strokeWidth: 5, color: C.green),
             ]),
             MarkerLayer(markers: [

@@ -72,8 +72,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: success()
         with:
-          tag_name: v1.3.0
-          name: Precision Trucking Driver GPS v1.3.0
+          tag_name: v1.3.1
+          name: Precision Trucking Driver GPS v1.3.1
           body: |
             ## 🚚 Precision Trucking Driver Companion (Native App) v1.3.0
             - **In-App Auto Update**: Automatic version check against server on app launch & manual check in Account tab
