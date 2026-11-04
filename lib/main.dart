@@ -11,13 +11,14 @@ import 'package:flutter_spinkit/flutter_spinkit.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const String kAppVersion = '1.4.0';
-const int kAppVersionCode = 9;
+const String kAppVersion = '1.5.0';
+const int kAppVersionCode = 10;
 
 // ============================================================
 // DESIGN TOKENS
@@ -1599,6 +1600,268 @@ class _GpsPageState extends State<GpsPage> {
     }
   }
 
+  Future<void> _addExpenseModal() async {
+    final sel = Tracker.I.selected;
+    if (sel == null) return;
+
+    String kat = 'bensin';
+    final nomCtrl = TextEditingController();
+    final ketCtrl = TextEditingController();
+    XFile? pickedPhoto;
+    bool isSubmitting = false;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setMState) => Padding(
+          padding: EdgeInsets.only(
+            left: 20,
+            right: 20,
+            top: 20,
+            bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 44,
+                    height: 5,
+                    decoration: BoxDecoration(color: C.border, borderRadius: BorderRadius.circular(4)),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(color: C.accent.withOpacity(0.15), shape: BoxShape.circle),
+                      child: const Icon(Icons.receipt_long_rounded, color: C.accent, size: 24),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Catat Bensin / Tol', style: t(17, w: FontWeight.w800)),
+                          Text('${sel['nomor_surat_jalan']}', style: t(12, c: C.muted)),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                Text('Jenis Pengeluaran', style: t(13, w: FontWeight.w700, c: C.muted)),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: InkWell(
+                        onTap: () => setMState(() => kat = 'bensin'),
+                        borderRadius: BorderRadius.circular(14),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          decoration: BoxDecoration(
+                            color: kat == 'bensin' ? C.accent.withOpacity(0.12) : C.bg,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: kat == 'bensin' ? C.accent : C.border, width: 2),
+                          ),
+                          child: Column(
+                            children: [
+                              const Icon(Icons.local_gas_station_rounded, color: C.accent, size: 26),
+                              const SizedBox(height: 4),
+                              Text('Bensin / BBM', style: t(13, w: FontWeight.w800, c: kat == 'bensin' ? C.accent : C.muted)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: InkWell(
+                        onTap: () => setMState(() => kat = 'tol'),
+                        borderRadius: BorderRadius.circular(14),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          decoration: BoxDecoration(
+                            color: kat == 'tol' ? C.primary.withOpacity(0.12) : C.bg,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: kat == 'tol' ? C.primary : C.border, width: 2),
+                          ),
+                          child: Column(
+                            children: [
+                              const Icon(Icons.toll_rounded, color: C.primary, size: 26),
+                              const SizedBox(height: 4),
+                              Text('Tiket / Tol', style: t(13, w: FontWeight.w800, c: kat == 'tol' ? C.primary : C.muted)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Text('Nominal Pengeluaran (Rp)', style: t(13, w: FontWeight.w700, c: C.muted)),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: nomCtrl,
+                  keyboardType: TextInputType.number,
+                  style: t(18, w: FontWeight.w800, c: C.primary),
+                  decoration: InputDecoration(
+                    prefixIcon: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Text('Rp', style: t(16, w: FontWeight.w800, c: C.muted)),
+                    ),
+                    prefixIconConstraints: const BoxConstraints(minWidth: 0, minHeight: 0),
+                    hintText: '50.000',
+                    filled: true,
+                    fillColor: C.bg,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text('Foto Bukti / Struk Nota', style: t(13, w: FontWeight.w700, c: C.muted)),
+                const SizedBox(height: 6),
+                InkWell(
+                  onTap: () async {
+                    final picker = ImagePicker();
+                    final source = await showModalBottomSheet<ImageSource>(
+                      context: ctx,
+                      backgroundColor: Colors.white,
+                      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+                      builder: (bctx) => SafeArea(
+                        child: Wrap(
+                          children: [
+                            ListTile(
+                              leading: const Icon(Icons.camera_alt_rounded, color: C.primary),
+                              title: const Text('Ambil Foto Kamera'),
+                              onTap: () => Navigator.pop(bctx, ImageSource.camera),
+                            ),
+                            ListTile(
+                              leading: const Icon(Icons.photo_library_rounded, color: C.accent),
+                              title: const Text('Pilih dari Galeri'),
+                              onTap: () => Navigator.pop(bctx, ImageSource.gallery),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                    if (source != null) {
+                      final img = await picker.pickImage(source: source, maxWidth: 1400, imageQuality: 80);
+                      if (img != null) {
+                        setMState(() => pickedPhoto = img);
+                      }
+                    }
+                  },
+                  borderRadius: BorderRadius.circular(16),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: C.bg,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: pickedPhoto != null ? C.green : C.border, width: 2),
+                    ),
+                    child: pickedPhoto == null
+                        ? Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Icon(Icons.add_a_photo_rounded, color: C.primary, size: 22),
+                              const SizedBox(width: 10),
+                              Text('Ambil Foto Struk Nota', style: t(14, w: FontWeight.w700, c: C.primary)),
+                            ],
+                          )
+                        : Row(
+                            children: [
+                              const Icon(Icons.check_circle_rounded, color: C.green, size: 24),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text('Foto struk terpilih: ${pickedPhoto!.name}',
+                                    maxLines: 1, overflow: TextOverflow.ellipsis, style: t(13, w: FontWeight.w700, c: C.green)),
+                              ),
+                              const Icon(Icons.refresh_rounded, color: C.muted, size: 20),
+                            ],
+                          ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text('Keterangan / Lokasi (Opsional)', style: t(13, w: FontWeight.w700, c: C.muted)),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: ketCtrl,
+                  decoration: InputDecoration(
+                    hintText: 'Ex: SPBU Rest Area KM 57 / Gerbang Tol',
+                    filled: true,
+                    fillColor: C.bg,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
+                  ),
+                ),
+                const SizedBox(height: 22),
+                SizedBox(
+                  width: double.infinity,
+                  height: 54,
+                  child: ElevatedButton(
+                    onPressed: isSubmitting
+                        ? null
+                        : () async {
+                            final rawNom = nomCtrl.text.replaceAll('.', '').replaceAll(',', '').trim();
+                            final nom = double.tryParse(rawNom);
+                            if (nom == null || nom <= 0) {
+                              snack(context, 'Masukkan nominal pengeluaran yang valid.', color: C.red);
+                              return;
+                            }
+                            if (pickedPhoto == null) {
+                              snack(context, 'Wajib melampirkan foto struk/nota.', color: C.red);
+                              return;
+                            }
+                            setMState(() => isSubmitting = true);
+                            try {
+                              final bytes = await pickedPhoto!.readAsBytes();
+                              final b64 = base64Encode(bytes);
+                              final res = await Api.post('/trucking/${sel['id']}/expense', {
+                                'kategori': kat,
+                                'nominal': nom,
+                                'keterangan': ketCtrl.text.trim(),
+                                'photo_base64': b64,
+                              });
+                              if (res['success'] == true) {
+                                if (ctx.mounted) Navigator.pop(ctx);
+                                if (mounted) {
+                                  snack(context, res['message'] ?? 'Bukti pengeluaran berhasil disimpan!', color: C.green);
+                                }
+                              } else {
+                                snack(context, res['message'] ?? 'Gagal menyimpan.', color: C.red);
+                              }
+                            } catch (e) {
+                              snack(context, 'Gagal upload: $e', color: C.red);
+                            } finally {
+                              setMState(() => isSubmitting = false);
+                            }
+                          },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: C.primary,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                    ),
+                    child: isSubmitting
+                        ? const SpinKitThreeBounce(color: Colors.white, size: 20)
+                        : Text('SIMPAN BUKTI PENGELUARAN', style: t(14.5, w: FontWeight.w800, c: Colors.white)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _openNav() async {
     final sel = Tracker.I.selected;
     if (sel == null) return;
@@ -1958,19 +2221,41 @@ class _GpsPageState extends State<GpsPage> {
         ]),
         if (sel != null) ...[
           const SizedBox(height: 10),
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: OutlinedButton.icon(
-              onPressed: _busy ? null : _finishTrip,
-              icon: const Icon(Icons.flag_circle_rounded, size: 24),
-              label: Text('SELESAIKAN PERJALANAN', style: t(14.5, w: FontWeight.w800, c: C.primary, ls: 0.5)),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: C.primary,
-                side: const BorderSide(color: C.primary, width: 2),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          Row(
+            children: [
+              Expanded(
+                child: SizedBox(
+                  height: 50,
+                  child: ElevatedButton.icon(
+                    onPressed: _busy ? null : _addExpenseModal,
+                    icon: const Icon(Icons.receipt_long_rounded, size: 20),
+                    label: Text('CATAT BENSIN / TOL', style: t(13, w: FontWeight.w800, c: Colors.white, ls: 0.3)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: C.accent,
+                      foregroundColor: C.navy,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    ),
+                  ),
+                ),
               ),
-            ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: SizedBox(
+                  height: 50,
+                  child: OutlinedButton.icon(
+                    onPressed: _busy ? null : _finishTrip,
+                    icon: const Icon(Icons.flag_circle_rounded, size: 20),
+                    label: Text('SELESAI TRIP', style: t(13, w: FontWeight.w800, c: C.primary, ls: 0.3)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: C.primary,
+                      side: const BorderSide(color: C.primary, width: 2),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ]),

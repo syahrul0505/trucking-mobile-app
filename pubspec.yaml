@@ -1,7 +1,7 @@
 name: trucking_mobile
 description: "Precision Trucking Driver App - Dedicated Native GPS & Trip Tracker"
 publish_to: "none"
-version: 1.4.0+9
+version: 1.5.0+10
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
@@ -20,6 +20,7 @@ dependencies:
   intl: ^0.19.0
   url_launcher: ^6.3.1
   permission_handler: ^11.3.1
+  image_picker: ^1.1.2
 
 dev_dependencies:
   flutter_test:
