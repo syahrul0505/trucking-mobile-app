@@ -72,12 +72,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: success()
         with:
-          tag_name: v1.5.0
-          name: Precision Trucking Driver GPS v1.5.0
+          tag_name: v1.5.1
+          name: Precision Trucking Driver GPS v1.5.1
           body: |
-            ## 🚚 Precision Trucking Driver Companion (Native App) v1.5.0
+            ## 🚚 Precision Trucking Driver Companion (Native App) v1.5.1
+            - **Galeri Struk Pengeluaran di HP**: Supir dapat melihat daftar foto struk bensin & tol, memperbesar foto, dan menghapus jika salah upload
             - **Input Bensin & Tol Per Surat Jalan**: Driver can directly log fuel & toll expenses with photo receipt and nominal
-            - **Finish Trip Action**: Complete journey button marks SJ as finished
             - **In-App Auto Update**: Seamless automatic version prompt
           files: build/app/outputs/flutter-apk/app-release.apk
         env:

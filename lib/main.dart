@@ -17,8 +17,8 @@ import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const String kAppVersion = '1.5.0';
-const int kAppVersionCode = 10;
+const String kAppVersion = '1.5.1';
+const int kAppVersionCode = 11;
 
 // ============================================================
 // DESIGN TOKENS
@@ -130,6 +130,15 @@ class Api {
       if (data is Map<String, dynamic>) return data;
       throw Exception('Respon server tidak valid');
     }
+    return _decode(res);
+  }
+
+  static Future<Map<String, dynamic>> delete(String path) async {
+    final tk = await token();
+    final res = await http.delete(
+      Uri.parse('$base$path'),
+      headers: {'Authorization': 'Bearer $tk', 'Accept': 'application/json'},
+    ).timeout(const Duration(seconds: 20));
     return _decode(res);
   }
 }
@@ -1297,6 +1306,7 @@ class _GpsPageState extends State<GpsPage> {
   LatLng? _idlePos;
   List<LatLng> _route = [];
   List<List<LatLng>> _history = [];
+  List<Map<String, dynamic>> _tripExpenses = [];
   double? _routeKm;
   double? _routeMin;
 
@@ -1364,13 +1374,20 @@ class _GpsPageState extends State<GpsPage> {
       _dest = null;
       _route = [];
       _history = [];
+      _tripExpenses = [];
       _routeKm = null;
       _routeMin = null;
     });
     try {
       final d = await Api.get('/trucking/$id');
       final segs = _splitSegments((d['points'] as List?) ?? []);
-      if (mounted && _loadedTripId == id) setState(() => _history = segs);
+      final exps = ((d['expenses'] as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      if (mounted && _loadedTripId == id) {
+        setState(() {
+          _history = segs;
+          _tripExpenses = exps;
+        });
+      }
     } catch (_) {}
     _idlePos ??= await _oneShotPosition();
     await _geocode(trip);
@@ -1833,6 +1850,7 @@ class _GpsPageState extends State<GpsPage> {
                                 if (ctx.mounted) Navigator.pop(ctx);
                                 if (mounted) {
                                   snack(context, res['message'] ?? 'Bukti pengeluaran berhasil disimpan!', color: C.green);
+                                  _loadTripData(sel);
                                 }
                               } else {
                                 snack(context, res['message'] ?? 'Gagal menyimpan.', color: C.red);
@@ -1858,6 +1876,248 @@ class _GpsPageState extends State<GpsPage> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  void _showExpenseListModal() {
+    final sel = Tracker.I.selected;
+    if (sel == null) return;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setMState) {
+          final totalBensin = _tripExpenses.where((e) => e['kategori'] == 'bensin').fold<double>(0.0, (sum, e) => sum + ((e['nominal'] as num?)?.toDouble() ?? 0.0));
+          final totalTol = _tripExpenses.where((e) => e['kategori'] == 'tol').fold<double>(0.0, (sum, e) => sum + ((e['nominal'] as num?)?.toDouble() ?? 0.0));
+          final grandTotal = _tripExpenses.fold<double>(0.0, (sum, e) => sum + ((e['nominal'] as num?)?.toDouble() ?? 0.0));
+
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.8),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 10),
+                  Center(
+                    child: Container(width: 44, height: 5, decoration: BoxDecoration(color: C.border, borderRadius: BorderRadius.circular(4))),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Bukti Pengeluaran Tercatat', style: t(17, w: FontWeight.w800)),
+                              Text('${sel['nomor_surat_jalan']} • ${_tripExpenses.length} Struk', style: t(12, c: C.muted)),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          icon: const Icon(Icons.close_rounded, color: C.muted),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (_tripExpenses.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+                      child: Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(color: C.bg, borderRadius: BorderRadius.circular(16)),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          children: [
+                            Column(
+                              children: [
+                                Text('⛽ Bensin', style: t(11, w: FontWeight.w700, c: C.accent)),
+                                const SizedBox(height: 2),
+                                Text('Rp ${totalBensin.toStringAsFixed(0)}', style: t(12.5, w: FontWeight.w800)),
+                              ],
+                            ),
+                            Container(width: 1, height: 26, color: C.border),
+                            Column(
+                              children: [
+                                Text('🛣️ Tol', style: t(11, w: FontWeight.w700, c: C.primary)),
+                                const SizedBox(height: 2),
+                                Text('Rp ${totalTol.toStringAsFixed(0)}', style: t(12.5, w: FontWeight.w800)),
+                              ],
+                            ),
+                            Container(width: 1, height: 26, color: C.border),
+                            Column(
+                              children: [
+                                Text('Total', style: t(11, w: FontWeight.w700, c: C.green)),
+                                const SizedBox(height: 2),
+                                Text('Rp ${grandTotal.toStringAsFixed(0)}', style: t(13, w: FontWeight.w800, c: C.green)),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  const Divider(color: C.border, height: 16),
+                  Flexible(
+                    child: _tripExpenses.isEmpty
+                        ? Padding(
+                            padding: const EdgeInsets.all(32),
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.receipt_long_outlined, size: 48, color: C.muted),
+                                  const SizedBox(height: 12),
+                                  Text('Belum ada bukti bensin atau tol', style: t(14, w: FontWeight.w700)),
+                                  const SizedBox(height: 4),
+                                  Text('Tap tombol Catat Bensin / Tol untuk menambah', style: t(12, c: C.muted)),
+                                ],
+                              ),
+                            ),
+                          )
+                        : ListView.separated(
+                            padding: const EdgeInsets.fromLTRB(20, 6, 20, 20),
+                            itemCount: _tripExpenses.length,
+                            separatorBuilder: (_, __) => const SizedBox(height: 10),
+                            itemBuilder: (_, i) {
+                              final item = _tripExpenses[i];
+                              final isBensin = item['kategori'] == 'bensin';
+                              final photoUrl = item['file_url'] as String?;
+                              final nom = (item['nominal'] as num?)?.toDouble() ?? 0.0;
+
+                              return Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(color: C.border),
+                                ),
+                                child: Row(
+                                  children: [
+                                    // Thumbnail Foto
+                                    if (photoUrl != null && photoUrl.isNotEmpty)
+                                      InkWell(
+                                        onTap: () {
+                                          showDialog(
+                                            context: context,
+                                            builder: (_) => Dialog(
+                                              backgroundColor: Colors.transparent,
+                                              child: Stack(
+                                                children: [
+                                                  InteractiveViewer(
+                                                    child: ClipRRect(
+                                                      borderRadius: BorderRadius.circular(16),
+                                                      child: Image.network(photoUrl, fit: BoxFit.contain),
+                                                    ),
+                                                  ),
+                                                  Positioned(
+                                                    top: 10,
+                                                    right: 10,
+                                                    child: IconButton(
+                                                      icon: const Icon(Icons.close_rounded, color: Colors.white, size: 30),
+                                                      onPressed: () => Navigator.pop(context),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                        borderRadius: BorderRadius.circular(12),
+                                        child: ClipRRect(
+                                          borderRadius: BorderRadius.circular(12),
+                                          child: Image.network(
+                                            photoUrl,
+                                            width: 54,
+                                            height: 54,
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (_, __, ___) => Container(
+                                              width: 54,
+                                              height: 54,
+                                              color: C.bg,
+                                              child: const Icon(Icons.broken_image_rounded, color: C.muted),
+                                            ),
+                                          ),
+                                        ),
+                                      )
+                                    else
+                                      Container(
+                                        width: 54,
+                                        height: 54,
+                                        decoration: BoxDecoration(color: C.bg, borderRadius: BorderRadius.circular(12)),
+                                        child: Icon(isBensin ? Icons.local_gas_station_rounded : Icons.toll_rounded, color: isBensin ? C.accent : C.primary),
+                                      ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                                decoration: BoxDecoration(
+                                                  color: (isBensin ? C.accent : C.primary).withOpacity(0.12),
+                                                  borderRadius: BorderRadius.circular(8),
+                                                ),
+                                                child: Text(
+                                                  isBensin ? 'BBM / Bensin' : 'Tol',
+                                                  style: t(10.5, w: FontWeight.w800, c: isBensin ? C.accent : C.primary),
+                                                ),
+                                              ),
+                                              const Spacer(),
+                                              Text(item['time'] ?? (item['tanggal'] ?? ''), style: t(11, c: C.muted)),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text('Rp ${nom.toStringAsFixed(0)}', style: t(15, w: FontWeight.w800)),
+                                          if ((item['keterangan'] ?? '').toString().isNotEmpty)
+                                            Text('${item['keterangan']}', maxLines: 1, overflow: TextOverflow.ellipsis, style: t(12, c: C.muted)),
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    // Tombol Hapus
+                                    IconButton(
+                                      icon: const Icon(Icons.delete_outline_rounded, color: C.red, size: 22),
+                                      tooltip: 'Hapus Bukti',
+                                      onPressed: () async {
+                                        final ok = await _confirm('Hapus bukti ini?', 'Foto dan data pengeluaran ini akan dihapus permanen.', 'Hapus', C.red);
+                                        if (!ok) return;
+                                        try {
+                                          final res = await Api.delete('/trucking/${sel['id']}/expense/${item['id']}');
+                                          if (res['success'] == true) {
+                                            setMState(() {
+                                              _tripExpenses.removeWhere((e) => e['id'] == item['id']);
+                                            });
+                                            if (mounted) {
+                                              setState(() {});
+                                              snack(context, 'Bukti pengeluaran berhasil dihapus.', color: C.green);
+                                            }
+                                          } else {
+                                            if (mounted) snack(context, res['message'] ?? 'Gagal menghapus.', color: C.red);
+                                          }
+                                        } catch (e) {
+                                          if (mounted) snack(context, 'Gagal menghapus: $e', color: C.red);
+                                        }
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -2229,7 +2489,7 @@ class _GpsPageState extends State<GpsPage> {
                   child: ElevatedButton.icon(
                     onPressed: _busy ? null : _addExpenseModal,
                     icon: const Icon(Icons.receipt_long_rounded, size: 20),
-                    label: Text('CATAT BENSIN / TOL', style: t(13, w: FontWeight.w800, c: Colors.white, ls: 0.3)),
+                    label: Text('CATAT BENSIN / TOL', style: t(12.5, w: FontWeight.w800, c: Colors.white, ls: 0.3)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: C.accent,
                       foregroundColor: C.navy,
@@ -2239,14 +2499,38 @@ class _GpsPageState extends State<GpsPage> {
                   ),
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 8),
+              InkWell(
+                onTap: _showExpenseListModal,
+                borderRadius: BorderRadius.circular(16),
+                child: Container(
+                  height: 50,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  decoration: BoxDecoration(
+                    color: C.bg,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: _tripExpenses.isNotEmpty ? C.accent : C.border, width: 1.5),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.collections_rounded, size: 20, color: _tripExpenses.isNotEmpty ? C.accent : C.muted),
+                      const SizedBox(width: 6),
+                      Text(
+                        '${_tripExpenses.length}',
+                        style: t(14, w: FontWeight.w800, c: _tripExpenses.isNotEmpty ? C.accent : C.muted),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: SizedBox(
                   height: 50,
                   child: OutlinedButton.icon(
                     onPressed: _busy ? null : _finishTrip,
                     icon: const Icon(Icons.flag_circle_rounded, size: 20),
-                    label: Text('SELESAI TRIP', style: t(13, w: FontWeight.w800, c: C.primary, ls: 0.3)),
+                    label: Text('SELESAI TRIP', style: t(12.5, w: FontWeight.w800, c: C.primary, ls: 0.3)),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: C.primary,
                       side: const BorderSide(color: C.primary, width: 2),
