@@ -16,8 +16,8 @@ import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const String kAppVersion = '1.3.3';
-const int kAppVersionCode = 8;
+const String kAppVersion = '1.4.0';
+const int kAppVersionCode = 9;
 
 // ============================================================
 // DESIGN TOKENS
@@ -801,14 +801,19 @@ class _MainShellState extends State<MainShell> {
 // ============================================================
 class StatusBadge extends StatelessWidget {
   final dynamic status;
-  const StatusBadge(this.status, {super.key});
+  final dynamic finishedAt;
+  const StatusBadge(this.status, {super.key, this.finishedAt});
 
   @override
   Widget build(BuildContext context) {
     final s = (status ?? '').toString().toLowerCase();
     Color c = C.muted;
     String label = s.toUpperCase();
-    if (s == 'approved') {
+    final done = finishedAt != null && '$finishedAt'.isNotEmpty && s != 'rejected';
+    if (done) {
+      c = C.primary;
+      label = 'SELESAI';
+    } else if (s == 'approved') {
       c = C.green;
       label = 'DISETUJUI';
     } else if (s == 'pending') {
@@ -1260,7 +1265,7 @@ class DashboardPageState extends State<DashboardPage> {
                     Text('${fmtDate(e['tanggal'])}  •  ${e['nomor_polisi'] ?? '-'}', style: t(11, c: const Color(0xFF94A3B8))),
                   ]),
                 ),
-                StatusBadge(e['status']),
+                StatusBadge(e['status'], finishedAt: e['finished_at']),
               ]),
             ),
           ),
@@ -1328,6 +1333,9 @@ class _GpsPageState extends State<GpsPage> {
         _trips = list;
         _loadingTrips = false;
       });
+      if (Tracker.I.selected != null && !list.any((e) => e['id'] == Tracker.I.selected!['id'])) {
+        Tracker.I.selected = null;
+      }
       if (Tracker.I.selected == null && list.isNotEmpty) {
         Tracker.I.select(list.first);
       } else if (Tracker.I.selected != null && Tracker.I.selected!['id'] != _loadedTripId) {
@@ -1543,6 +1551,51 @@ class _GpsPageState extends State<GpsPage> {
     } else {
       snack(context, 'GPS aktif. Lokasi dikirim otomatis tiap 15 detik.', color: C.green);
       _computeRoute();
+    }
+  }
+
+  Future<void> _finishTrip() async {
+    final sel = Tracker.I.selected;
+    if (sel == null) return;
+    final ok = await _confirm(
+      'Selesaikan perjalanan?',
+      'Pastikan barang sudah diterima di tujuan. GPS akan dimatikan dan surat jalan ${sel['nomor_surat_jalan']} ditandai SELESAI.',
+      'Selesai',
+      C.primary,
+    );
+    if (!ok) return;
+    setState(() => _busy = true);
+    try {
+      final p = Tracker.I.position ?? await Geolocator.getLastKnownPosition();
+      final body = <String, dynamic>{};
+      if (p != null) {
+        body['latitude'] = p.latitude;
+        body['longitude'] = p.longitude;
+        body['accuracy'] = p.accuracy;
+      }
+      if (Tracker.I.battery >= 0) body['battery'] = Tracker.I.battery;
+      final d = await Api.post('/trucking/${sel['id']}/finish', body);
+      if (d['success'] != true) throw Exception(d['message'] ?? 'Gagal');
+      if (Tracker.I.isTracking(sel)) await Tracker.I.stop();
+      Tracker.I.selected = null;
+      _loadedTripId = null;
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _dest = null;
+        _route = [];
+        _history = [];
+        _routeKm = null;
+        _routeMin = null;
+      });
+      snack(context, '${d['message'] ?? 'Perjalanan selesai.'}', color: C.green);
+      await _loadTrips();
+    } on AuthExpired {
+      if (mounted) logoutAndExit(context);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      snack(context, 'Gagal menyelesaikan perjalanan. Cek koneksi internet lalu coba lagi.', color: C.red);
     }
   }
 
@@ -1903,6 +1956,23 @@ class _GpsPageState extends State<GpsPage> {
             ),
           ),
         ]),
+        if (sel != null) ...[
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            height: 52,
+            child: OutlinedButton.icon(
+              onPressed: _busy ? null : _finishTrip,
+              icon: const Icon(Icons.flag_circle_rounded, size: 24),
+              label: Text('SELESAIKAN PERJALANAN', style: t(14.5, w: FontWeight.w800, c: C.primary, ls: 0.5)),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: C.primary,
+                side: const BorderSide(color: C.primary, width: 2),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              ),
+            ),
+          ),
+        ],
       ]),
     );
   }
@@ -1950,8 +2020,13 @@ class HistoryPageState extends State<HistoryPage> {
 
   @override
   Widget build(BuildContext context) {
-    final items = _filter == 'all' ? _items : _items.where((e) => '${e['status']}'.toLowerCase() == _filter).toList();
-    const filters = {'all': 'Semua', 'pending': 'Menunggu', 'approved': 'Disetujui', 'rejected': 'Ditolak'};
+    bool isDone(Map e) => e['finished_at'] != null && '${e['status']}'.toLowerCase() != 'rejected';
+    final items = _filter == 'all'
+        ? _items
+        : _filter == 'done'
+            ? _items.where(isDone).toList()
+            : _items.where((e) => !isDone(e) && '${e['status']}'.toLowerCase() == _filter).toList();
+    const filters = {'all': 'Semua', 'pending': 'Menunggu', 'approved': 'Disetujui', 'done': 'Selesai', 'rejected': 'Ditolak'};
 
     return Column(children: [
       PageHeader(title: 'Riwayat Surat Jalan', subtitle: '${_items.length} surat jalan terakhir'),
@@ -2014,7 +2089,7 @@ class HistoryPageState extends State<HistoryPage> {
               Text(fmtDate(e['tanggal']), style: t(12, w: FontWeight.w600, c: C.muted)),
             ]),
           ),
-          StatusBadge(e['status']),
+          StatusBadge(e['status'], finishedAt: e['finished_at']),
         ]),
         const SizedBox(height: 12),
         Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
