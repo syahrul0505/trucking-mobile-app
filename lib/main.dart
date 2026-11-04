@@ -16,8 +16,8 @@ import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const String kAppVersion = '1.3.2';
-const int kAppVersionCode = 7;
+const String kAppVersion = '1.3.3';
+const int kAppVersionCode = 8;
 
 // ============================================================
 // DESIGN TOKENS
@@ -1291,9 +1291,6 @@ class _GpsPageState extends State<GpsPage> {
   LatLng? _idlePos;
   List<LatLng> _route = [];
   List<List<LatLng>> _history = [];
-  List<List<LatLng>> _gaps = [];
-  LatLng? _start;
-  bool _destMissing = false;
   double? _routeKm;
   double? _routeMin;
 
@@ -1356,159 +1353,50 @@ class _GpsPageState extends State<GpsPage> {
     _loadedTripId = id;
     setState(() {
       _dest = null;
-      _destMissing = false;
       _route = [];
       _history = [];
-      _gaps = [];
-      _start = null;
       _routeKm = null;
       _routeMin = null;
     });
-    bool destFromServer = false;
     try {
       final d = await Api.get('/trucking/$id');
-      final dest = d['destination'];
-      if (dest is Map && dest['lat'] != null && dest['lng'] != null) {
-        destFromServer = true;
-        if (mounted && _loadedTripId == id) {
-          setState(() => _dest = LatLng((dest['lat'] as num).toDouble(), (dest['lng'] as num).toDouble()));
-        }
-      } else if (d.containsKey('destination')) {
-        // Server sudah mencoba geocode dan gagal: sama seperti web, jangan tebak lokasi
-        destFromServer = true;
-        if (mounted && _loadedTripId == id) setState(() => _destMissing = true);
-      }
-      await _buildHistory(id, (d['points'] as List?) ?? []);
+      final segs = _splitSegments((d['points'] as List?) ?? []);
+      if (mounted && _loadedTripId == id) setState(() => _history = segs);
     } catch (_) {}
     _idlePos ??= await _oneShotPosition();
-    if (!destFromServer) await _geocode(trip);
+    await _geocode(trip);
     if (_loadedTripId != id) return;
     await _computeRoute();
     _fitAll();
   }
 
-  // ------------------------------------------------------------
-  // Riwayat GPS: logika SAMA dengan peta web (track.blade.php)
-  //  - buang titik akurasi > 150 m, buang getaran < 12 m
-  //  - jeda > 2 menit DAN pindah > 300 m = GPS terputus (oranye putus-putus)
-  //  - tiap segmen bersambung di-snap ke jalan via OSRM (biru)
-  // ------------------------------------------------------------
-  static const _dist = Distance();
-
-  double _km(LatLng a, LatLng b) => _dist.distance(a, b) / 1000.0;
-
-  double _perpKm(LatLng p, LatLng a, LatLng b) {
-    final dx = b.latitude - a.latitude, dy = b.longitude - a.longitude;
-    if (dx == 0 && dy == 0) return _km(p, a);
-    var t = ((p.latitude - a.latitude) * dx + (p.longitude - a.longitude) * dy) / (dx * dx + dy * dy);
-    t = t.clamp(0.0, 1.0);
-    return _km(p, LatLng(a.latitude + t * dx, a.longitude + t * dy));
-  }
-
-  List<LatLng> _rdp(List<LatLng> pts, double epsKm) {
-    if (pts.length <= 2) return pts;
-    var maxD = 0.0, idx = 0;
-    for (var i = 1; i < pts.length - 1; i++) {
-      final d = _perpKm(pts[i], pts.first, pts.last);
-      if (d > maxD) {
-        maxD = d;
-        idx = i;
-      }
-    }
-    if (maxD > epsKm) {
-      final l = _rdp(pts.sublist(0, idx + 1), epsKm);
-      final r = _rdp(pts.sublist(idx), epsKm);
-      return [...l.sublist(0, l.length - 1), ...r];
-    }
-    return [pts.first, pts.last];
-  }
-
-  double _pathKm(List<LatLng> s) {
-    var d = 0.0;
-    for (var i = 1; i < s.length; i++) {
-      d += _km(s[i - 1], s[i]);
-    }
-    return d;
-  }
-
-  Future<List<LatLng>?> _osrm(List<LatLng> wps, {bool straight = false}) async {
-    try {
-      final coords = wps.map((w) => '${w.longitude.toStringAsFixed(6)},${w.latitude.toStringAsFixed(6)}').join(';');
-      final url = Uri.parse('https://router.project-osrm.org/route/v1/driving/$coords'
-          '?overview=full&geometries=geojson${straight ? '&continue_straight=true' : ''}');
-      final res = await http.get(url).timeout(const Duration(seconds: 15));
-      final d = jsonDecode(res.body);
-      if (d is Map && d['code'] == 'Ok' && (d['routes'] as List?)?.isNotEmpty == true) {
-        final r = (d['routes'] as List)[0] as Map;
-        return ((r['geometry'] as Map)['coordinates'] as List)
-            .map((c) => LatLng(((c as List)[1] as num).toDouble(), (c[0] as num).toDouble()))
-            .toList();
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  Future<List<LatLng>> _snapSegment(List<LatLng> seg) async {
-    if (seg.length < 2) return seg;
-    var wps = _rdp(seg, 0.02);
-    if (wps.length <= 2 && _km(wps.first, wps.last) < 0.025) return seg;
-    if (wps.length > 25) {
-      final step = wps.length / 23;
-      wps = [wps.first, for (var i = 1; i < 23; i++) wps[(i * step).floor()], wps.last];
-    }
-    final snapped = await _osrm(wps, straight: true);
-    if (snapped == null || snapped.length < 2) return seg;
-    final direct = _pathKm(seg);
-    // Snap memutar terlalu jauh (> 1.8x jarak GPS asli) = OSRM menebak, pakai GPS asli
-    if (direct > 0.2 && _pathKm(snapped) > direct * 1.8) return seg;
-    return snapped;
-  }
-
-  Future<void> _buildHistory(dynamic id, List raw) async {
-    final pts = <({LatLng p, int? ts})>[];
+  /// Pecah titik GPS jadi beberapa segmen. Titik yang terpisah jauh (>1 km)
+  /// atau jeda waktu lama (>5 menit, mis. GPS dimatikan) tidak disambung
+  /// dengan garis lurus.
+  List<List<LatLng>> _splitSegments(List raw) {
+    const dist = Distance();
+    final segs = <List<LatLng>>[];
+    var cur = <LatLng>[];
+    LatLng? prev;
+    int? prevTs;
     for (final r in raw) {
       if (r is! Map || r['lat'] == null || r['lng'] == null) continue;
-      final acc = (r['accuracy'] as num?)?.toDouble();
-      if (acc != null && acc > 150) continue;
-      pts.add((p: LatLng((r['lat'] as num).toDouble(), (r['lng'] as num).toDouble()), ts: (r['ts'] as num?)?.toInt()));
-    }
-    if (pts.isEmpty) return;
-
-    final clean = [pts.first];
-    for (var i = 1; i < pts.length; i++) {
-      if (_km(clean.last.p, pts[i].p) > 0.012 || i == pts.length - 1) clean.add(pts[i]);
-    }
-
-    final segs = <List<LatLng>>[
-      [clean.first.p]
-    ];
-    final gaps = <List<LatLng>>[];
-    for (var i = 1; i < clean.length; i++) {
-      final a = clean[i - 1], b = clean[i];
-      final dt = (a.ts != null && b.ts != null) ? b.ts! - a.ts! : 0;
-      if (dt > 120 && _km(a.p, b.p) * 1000 > 300) {
-        gaps.add([a.p, b.p]);
-        segs.add([b.p]);
-      } else {
-        segs.last.add(b.p);
+      final p = LatLng((r['lat'] as num).toDouble(), (r['lng'] as num).toDouble());
+      final ts = (r['ts'] as num?)?.toInt();
+      if (prev != null) {
+        final gapM = dist.distance(prev, p);
+        final gapS = (ts != null && prevTs != null) ? ts - prevTs : 0;
+        if (gapM > 1000 || gapS > 300) {
+          if (cur.length > 1) segs.add(cur);
+          cur = <LatLng>[];
+        }
       }
+      cur.add(p);
+      prev = p;
+      prevTs = ts;
     }
-
-    if (!mounted || _loadedTripId != id) return;
-    setState(() {
-      _start = clean.first.p;
-      _history = segs.where((s) => s.length > 1).toList();
-      _gaps = gaps;
-    });
-
-    // Snap ke jalan di latar belakang (seperti web)
-    final snapped = await Future.wait(segs.where((s) => s.length > 1).map(_snapSegment));
-    final routedGaps = await Future.wait(gaps.map((g) async => (await _osrm(g)) ?? g));
-    if (!mounted || _loadedTripId != id) return;
-    setState(() {
-      _history = snapped;
-      _gaps = routedGaps;
-    });
+    if (cur.length > 1) segs.add(cur);
+    return segs;
   }
 
   Future<LatLng?> _oneShotPosition() async {
@@ -1586,7 +1474,7 @@ class _GpsPageState extends State<GpsPage> {
   void _fitAll() {
     if (!_mapReady || !mounted) return;
     final me = _me;
-    final pts = <LatLng>[if (me != null) me, if (_dest != null) _dest!, ..._route, for (final s in _history) ...s, for (final g in _gaps) ...g];
+    final pts = <LatLng>[if (me != null) me, if (_dest != null) _dest!, ..._route, for (final s in _history) ...s];
     if (pts.isEmpty) return;
     if (pts.length == 1) {
       _map.move(pts.first, 15);
@@ -1783,46 +1671,20 @@ class _GpsPageState extends State<GpsPage> {
               urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
               userAgentPackageName: 'com.precision.trucking_mobile',
             ),
-            // Warna & gaya garis SAMA dengan peta web:
-            //  abu putus-putus = rencana rute ke tujuan
-            //  biru            = jalur yang sudah ditempuh (snap ke jalan)
-            //  oranye titik    = GPS terputus (perkiraan lewat jalan)
             PolylineLayer(polylines: [
               if (_route.length > 1)
-                Polyline(
-                  points: _route,
-                  strokeWidth: 4,
-                  color: const Color(0xFF94A3B8),
-                  pattern: StrokePattern.dashed(segments: const [8, 8]),
-                ),
-              for (final seg in _history)
-                Polyline(points: seg, strokeWidth: 5, color: const Color(0xFF2563EB), borderStrokeWidth: 2.5, borderColor: const Color(0x8093C5FD)),
-              if (trackingThis && tracker.trail.length > 1)
-                Polyline(points: List<LatLng>.of(tracker.trail), strokeWidth: 5, color: const Color(0xFF2563EB), borderStrokeWidth: 2.5, borderColor: const Color(0x8093C5FD)),
-              for (final g in _gaps)
-                Polyline(points: g, strokeWidth: 5, color: const Color(0xFFF59E0B), pattern: StrokePattern.dotted()),
+                Polyline(points: _route, strokeWidth: 6, color: C.primary.withOpacity(0.75), borderStrokeWidth: 2, borderColor: Colors.white),
+              for (final seg in _history) Polyline(points: seg, strokeWidth: 4, color: C.accent),
+              if (trackingThis && tracker.trail.length > 1) Polyline(points: List<LatLng>.of(tracker.trail), strokeWidth: 5, color: C.green),
             ]),
             MarkerLayer(markers: [
-              if (_start != null)
-                Marker(
-                  point: _start!,
-                  width: 34,
-                  height: 34,
-                  child: Container(
-                    decoration: BoxDecoration(color: C.green, shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 3)),
-                    child: const Icon(Icons.flag_rounded, color: Colors.white, size: 16),
-                  ),
-                ),
               if (_dest != null)
                 Marker(
                   point: _dest!,
-                  width: 40,
-                  height: 40,
+                  width: 48,
+                  height: 48,
                   alignment: Alignment.topCenter,
-                  child: Container(
-                    decoration: BoxDecoration(color: C.red, shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 3)),
-                    child: const Icon(Icons.sports_score_rounded, color: Colors.white, size: 20),
-                  ),
+                  child: const Icon(Icons.location_on_rounded, color: C.red, size: 48),
                 ),
               if (me != null)
                 Marker(
@@ -1975,7 +1837,7 @@ class _GpsPageState extends State<GpsPage> {
             Text(tracker.failed > 0 ? 'Gagal kirim (${tracker.failed}x)' : 'Terkirim ${tracker.pings}x • ${tracker.lastSync}',
                 style: t(11.5, w: FontWeight.w700, c: tracker.failed > 0 ? C.red : C.muted)),
           ] else
-            Text(_dest != null ? 'Tujuan ditemukan' : (_destMissing ? 'Alamat tujuan tidak terbaca' : 'Mencari lokasi tujuan...'), style: t(11.5, w: FontWeight.w600, c: C.muted)),
+            Text(_dest == null ? 'Mencari lokasi tujuan...' : 'Tujuan ditemukan', style: t(11.5, w: FontWeight.w600, c: C.muted)),
         ]),
         const SizedBox(height: 14),
         Row(children: [
