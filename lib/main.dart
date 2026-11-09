@@ -17,8 +17,8 @@ import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const String kAppVersion = '1.5.1';
-const int kAppVersionCode = 11;
+const String kAppVersion = '1.6.0';
+const int kAppVersionCode = 12;
 
 // ============================================================
 // DESIGN TOKENS
@@ -159,11 +159,17 @@ Future<void> logoutAndExit(BuildContext context) async {
 }
 
 // ============================================================
-// GPS TRACKER (singleton, tetap jalan saat pindah tab)
+// GPS TRACKER (singleton, tetap jalan saat pindah tab / aplikasi lain)
+// - Lokasi disimpan dulu ke antrian di HP (tahan sinyal hilang / app di background)
+// - Antrian dikirim per batch dengan jam asli, jadi jejak di peta tidak bolong
+// - Status tracking disimpan, otomatis lanjut saat aplikasi dibuka lagi
 // ============================================================
 class Tracker extends ChangeNotifier {
   Tracker._();
   static final Tracker I = Tracker._();
+
+  static const _kTrip = 'trk_trip';
+  static const _kQueue = 'trk_queue';
 
   final Battery _battery = Battery();
 
@@ -179,9 +185,19 @@ class Tracker extends ChangeNotifier {
   String lastSync = '-';
   final List<LatLng> trail = [];
 
+  final List<Map<String, dynamic>> _queue = [];
+  int get queued => _queue.length;
+  bool _queueLoaded = false;
+
   StreamSubscription<Position>? _sub;
   Timer? _timer;
   bool _sending = false;
+  bool _watchBusy = false;
+  bool _restoring = false;
+  DateTime? _lastFixAt;
+  DateTime? _lastQueuedAt;
+  DateTime? _lastRestartAt;
+  Position? _lastQueuedPos;
 
   bool isTracking(Map<String, dynamic>? trip) =>
       trip != null && tracking != null && tracking!['id'] == trip['id'];
@@ -191,7 +207,7 @@ class Tracker extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<String?> start(Map<String, dynamic> trip) async {
+  Future<String?> start(Map<String, dynamic> trip, {bool resume = false}) async {
     if (!await Geolocator.isLocationServiceEnabled()) {
       return 'GPS HP belum aktif. Nyalakan Lokasi di pengaturan HP.';
     }
@@ -200,92 +216,315 @@ class Tracker extends ChangeNotifier {
     if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
       return 'Izin lokasi ditolak. Aktifkan izin Lokasi untuk aplikasi ini.';
     }
-    try {
-      await ph.Permission.notification.request();
-    } catch (_) {}
+    if (!resume) {
+      try {
+        await ph.Permission.notification.request();
+      } catch (_) {}
+      // Supaya Android tidak mematikan aplikasi saat supir buka WA / Maps
+      try {
+        if (!await ph.Permission.ignoreBatteryOptimizations.isGranted) {
+          await ph.Permission.ignoreBatteryOptimizations.request();
+        }
+      } catch (_) {}
+    }
 
-    await stop(notify: false);
+    await stop(notify: false, clearSaved: false, flush: false);
+    await _loadQueue();
     tracking = trip;
     selected = trip;
     pings = 0;
     failed = 0;
     lastSync = '-';
     trail.clear();
+    _lastQueuedAt = null;
+    _lastQueuedPos = null;
+    await _saveTrip();
 
-    final LocationSettings settings = defaultTargetPlatform == TargetPlatform.android
-        ? AndroidSettings(
-            accuracy: LocationAccuracy.high,
-            distanceFilter: 5,
-            intervalDuration: const Duration(seconds: 5),
-            foregroundNotificationConfig: const ForegroundNotificationConfig(
-              notificationTitle: 'Precision Driver - GPS Aktif',
-              notificationText: 'Lokasi perjalanan sedang dikirim ke kantor',
-              enableWakeLock: true,
-            ),
-          )
-        : const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 5);
+    _listen();
+    _timer = Timer.periodic(const Duration(seconds: 15), (_) => _tick());
 
-    _sub = Geolocator.getPositionStream(locationSettings: settings).listen(_onPos, onError: (_) {});
-    _timer = Timer.periodic(const Duration(seconds: 15), (_) => _ping());
-
+    try {
+      battery = await _battery.batteryLevel;
+    } catch (_) {}
     try {
       _onPos(await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, timeLimit: Duration(seconds: 15)),
       ));
     } catch (_) {}
-    _ping();
+    _flush();
     notifyListeners();
     return null;
   }
 
+  void _listen() {
+    _sub?.cancel();
+    _lastRestartAt = DateTime.now();
+    final LocationSettings settings = defaultTargetPlatform == TargetPlatform.android
+        ? AndroidSettings(
+            accuracy: LocationAccuracy.high,
+            distanceFilter: 0,
+            intervalDuration: const Duration(seconds: 5),
+            foregroundNotificationConfig: const ForegroundNotificationConfig(
+              notificationTitle: 'Precision Driver - GPS Aktif',
+              notificationText: 'Lokasi perjalanan sedang dikirim ke kantor',
+              enableWakeLock: true,
+              enableWifiLock: true,
+              setOngoing: true,
+            ),
+          )
+        : const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 0);
+
+    _sub = Geolocator.getPositionStream(locationSettings: settings).listen(
+      _onPos,
+      onError: (_) {},
+      onDone: () => _sub = null,
+      cancelOnError: false,
+    );
+  }
+
   void _onPos(Position p) {
+    if (tracking == null) return;
     position = p;
-    speedKmh = p.speed < 0 ? 0 : (p.speed * 3.6).clamp(0, 160).toDouble();
+    _lastFixAt = DateTime.now();
+    speedKmh = p.speed < 0 ? 0.0 : (p.speed * 3.6).clamp(0, 160).toDouble();
     trail.add(LatLng(p.latitude, p.longitude));
     if (trail.length > 3000) trail.removeAt(0);
+    _enqueue(p);
     notifyListeners();
   }
 
-  Future<void> _ping() async {
+  /// Simpan titik ke antrian: tiap >=10 detik, atau lebih cepat bila sudah pindah >=50 m.
+  void _enqueue(Position p, {bool force = false}) {
     final trip = tracking;
-    final p = position;
-    if (trip == null || p == null || _sending) return;
-    _sending = true;
+    if (trip == null) return;
+    final now = DateTime.now();
+    final last = _lastQueuedAt;
+    if (!force && last != null) {
+      final secs = now.difference(last).inSeconds;
+      final prev = _lastQueuedPos;
+      final moved = prev == null
+          ? 9999.0
+          : Geolocator.distanceBetween(prev.latitude, prev.longitude, p.latitude, p.longitude);
+      if (secs < 5) return;
+      if (secs < 10 && moved < 50) return;
+    }
+    _queue.add({
+      'trip': trip['id'],
+      'latitude': p.latitude,
+      'longitude': p.longitude,
+      'accuracy': p.accuracy,
+      'speed': p.speed < 0 ? 0.0 : (p.speed * 3.6).clamp(0, 160).toDouble(),
+      'heading': p.heading,
+      'battery': battery >= 0 ? battery : null,
+      'ts': now.millisecondsSinceEpoch ~/ 1000,
+    });
+    if (_queue.length > 5000) _queue.removeRange(0, _queue.length - 5000);
+    _lastQueuedAt = now;
+    _lastQueuedPos = p;
+    _saveQueue();
+  }
+
+  /// Jalan tiap 15 detik: cek GPS masih hidup, kirim titik "diam", lalu kirim antrian.
+  Future<void> _tick() async {
+    if (tracking == null) return;
     try {
       battery = await _battery.batteryLevel;
     } catch (_) {}
-    try {
-      final data = await Api.post('/trucking/${trip['id']}/ping', {
-        'latitude': p.latitude,
-        'longitude': p.longitude,
-        'accuracy': p.accuracy,
-        'speed': speedKmh,
-        'heading': p.heading,
-        'battery': battery >= 0 ? battery : null,
-      });
-      if (data['success'] == true) {
-        pings++;
-        failed = 0;
-        lastSync = (data['time'] ?? '-').toString();
-      } else {
-        failed++;
+
+    final now = DateTime.now();
+    final lastFix = _lastFixAt;
+    final staleSecs = lastFix == null ? 999 : now.difference(lastFix).inSeconds;
+    if (staleSecs > 40 && !_watchBusy) {
+      _watchBusy = true;
+      final lastRestart = _lastRestartAt;
+      if (staleSecs > 60 && (lastRestart == null || now.difference(lastRestart).inSeconds > 120)) {
+        _listen(); // stream GPS macet, nyalakan ulang
       }
-    } catch (_) {
-      failed++;
+      try {
+        _onPos(await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, timeLimit: Duration(seconds: 10)),
+        ));
+      } catch (_) {}
+      _watchBusy = false;
     }
-    _sending = false;
-    notifyListeners();
+
+    final p = position;
+    final lq = _lastQueuedAt;
+    if (p != null && (lq == null || DateTime.now().difference(lq).inSeconds >= 30)) {
+      _enqueue(p, force: true);
+    }
+    await _flush();
   }
 
-  Future<void> stop({bool notify = true}) async {
+  /// Dipanggil saat aplikasi kembali dibuka (setelah buka WA / Maps).
+  Future<void> onResume() async {
+    if (tracking != null) {
+      final lastFix = _lastFixAt;
+      if (_sub == null || lastFix == null || DateTime.now().difference(lastFix).inSeconds > 30) {
+        _listen();
+      }
+      await _tick();
+    } else {
+      await restore();
+    }
+  }
+
+  /// Kirim antrian ke server per batch (maks 100 titik per request).
+  Future<void> _flush() async {
+    if (_sending || _queue.isEmpty) return;
+    _sending = true;
+    try {
+      var rounds = 0;
+      while (_queue.isNotEmpty && rounds < 20) {
+        rounds++;
+        final tripId = _queue.first['trip'];
+        final batch = _queue.where((e) => e['trip'] == tripId).take(100).toList();
+        final body = <String, dynamic>{
+          'points': batch.map((e) => Map<String, dynamic>.from(e)..remove('trip')).toList(),
+        };
+        Map<String, dynamic> data;
+        try {
+          data = await Api.post('/trucking/$tripId/ping-batch', body);
+        } on AuthExpired {
+          failed++;
+          break;
+        } catch (_) {
+          failed++; // tidak ada sinyal: simpan, coba lagi nanti
+          break;
+        }
+
+        if (data['success'] == true) {
+          final sent = batch.toSet();
+          _queue.removeWhere(sent.contains);
+          pings += batch.length;
+          failed = 0;
+          lastSync = (data['time'] ?? '-').toString();
+          await _saveQueue();
+          if (data['stop'] == true && tracking != null && tracking!['id'] == tripId) {
+            await stop(notify: false, flush: false);
+            break;
+          }
+        } else {
+          final msg = '${data['message'] ?? ''}';
+          final rejected = data['success'] == false || data['errors'] != null || msg.contains('No query results');
+          if (rejected) {
+            // Ditolak server (trip dihapus / akses ditolak / data rusak): buang supaya antrian tidak macet
+            final sent = batch.toSet();
+            _queue.removeWhere(sent.contains);
+            await _saveQueue();
+            continue;
+          }
+          failed++;
+          break;
+        }
+      }
+    } finally {
+      _sending = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _loadQueue() async {
+    if (_queueLoaded) return;
+    _queueLoaded = true;
+    try {
+      final raw = (await SharedPreferences.getInstance()).getString(_kQueue) ?? '';
+      if (raw.isEmpty) return;
+      final list = jsonDecode(raw);
+      if (list is List) {
+        for (final e in list) {
+          if (e is Map) _queue.add(Map<String, dynamic>.from(e));
+        }
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _saveQueue() async {
+    try {
+      await (await SharedPreferences.getInstance()).setString(_kQueue, jsonEncode(_queue));
+    } catch (_) {}
+  }
+
+  Future<void> _saveTrip() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (tracking == null) {
+        await prefs.remove(_kTrip);
+      } else {
+        await prefs.setString(_kTrip, jsonEncode(tracking));
+      }
+    } catch (_) {}
+  }
+
+  /// Lanjutkan tracking yang masih aktif saat aplikasi sempat tertutup.
+  Future<void> restore() async {
+    if (_restoring) return;
+    _restoring = true;
+    try {
+      await _loadQueue();
+      final raw = (await SharedPreferences.getInstance()).getString(_kTrip) ?? '';
+      if (raw.isNotEmpty && tracking == null) {
+        final trip = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+        await start(trip, resume: true);
+      } else {
+        await _flush();
+      }
+    } catch (_) {
+    } finally {
+      _restoring = false;
+    }
+  }
+
+  /// Kirim sisa antrian sekarang (dipakai sebelum menyelesaikan perjalanan).
+  Future<void> flushNow() async {
+    try {
+      await _flush().timeout(const Duration(seconds: 15));
+    } catch (_) {}
+  }
+
+  Future<void> stop({bool notify = true, bool clearSaved = true, bool flush = true}) async {
     await _sub?.cancel();
     _sub = null;
     _timer?.cancel();
     _timer = null;
     tracking = null;
     speedKmh = 0;
+    if (clearSaved) await _saveTrip();
+    if (flush) {
+      try {
+        await _flush().timeout(const Duration(seconds: 8));
+      } catch (_) {}
+    }
     if (notify) notifyListeners();
   }
+}
+
+/// Pecah titik GPS jadi beberapa segmen. Titik yang terpisah jauh (>1 km)
+/// atau jeda waktu lama (>5 menit) tidak disambung dengan garis lurus.
+List<List<LatLng>> splitTrackSegments(List raw) {
+  const dist = Distance();
+  final segs = <List<LatLng>>[];
+  var cur = <LatLng>[];
+  LatLng? prev;
+  int? prevTs;
+  for (final r in raw) {
+    if (r is! Map || r['lat'] == null || r['lng'] == null) continue;
+    final p = LatLng((r['lat'] as num).toDouble(), (r['lng'] as num).toDouble());
+    final ts = (r['ts'] as num?)?.toInt();
+    if (prev != null) {
+      final gapM = dist.distance(prev, p);
+      final gapS = (ts != null && prevTs != null) ? ts - prevTs : 0;
+      if (gapM > 1000 || gapS > 300) {
+        if (cur.length > 1) segs.add(cur);
+        cur = <LatLng>[];
+      }
+    }
+    cur.add(p);
+    prev = p;
+    prevTs = ts;
+  }
+  if (cur.length > 1) segs.add(cur);
+  return segs;
 }
 
 // ============================================================
@@ -451,6 +690,7 @@ class _LoginScreenState extends State<LoginScreen> {
         await prefs.setString('user_username', (user['username'] ?? '').toString());
         await prefs.setString('user_phone', (user['phone'] ?? '').toString());
         await prefs.setString('user_email', (user['email'] ?? '').toString());
+        await prefs.setBool('is_admin', user['is_admin'] == true);
         if (!mounted) return;
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const MainShell()));
       } else {
@@ -602,17 +842,51 @@ class MainShell extends StatefulWidget {
   State<MainShell> createState() => _MainShellState();
 }
 
-class _MainShellState extends State<MainShell> {
+class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   int _index = 0;
+  bool _isAdmin = false;
   final _dashKey = GlobalKey<DashboardPageState>();
   final _historyKey = GlobalKey<HistoryPageState>();
+  final _monitorKey = GlobalKey<MonitorPageState>();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    SharedPreferences.getInstance().then((p) {
+      if (mounted) setState(() => _isAdmin = p.getBool('is_admin') ?? false);
+    });
+    _syncRole();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkForUpdate();
+      Tracker.I.restore();
     });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) Tracker.I.onResume();
+  }
+
+  /// Ambil role terbaru dari server (akun lama yang login sebelum v1.6.0 belum punya flag is_admin).
+  Future<void> _syncRole() async {
+    try {
+      final d = await Api.get('/me');
+      final admin = d['is_admin'] == true;
+      (await SharedPreferences.getInstance()).setBool('is_admin', admin);
+      if (mounted && admin != _isAdmin) {
+        setState(() {
+          _isAdmin = admin;
+          if (!admin && _index > 3) _index = 0;
+        });
+      }
+    } catch (_) {}
   }
 
   Future<void> _checkForUpdate() async {
@@ -729,6 +1003,7 @@ class _MainShellState extends State<MainShell> {
   void _onTab(int i) {
     if (i == 0) _dashKey.currentState?.load();
     if (i == 2) _historyKey.currentState?.load();
+    if (i == 4) _monitorKey.currentState?.load();
     setState(() => _index = i);
   }
 
@@ -756,6 +1031,7 @@ class _MainShellState extends State<MainShell> {
                 const GpsPage(),
                 HistoryPage(key: _historyKey, onOpenGps: _goGps),
                 const ProfilePage(),
+                if (_isAdmin) MonitorPage(key: _monitorKey),
               ],
             ),
             bottomNavigationBar: NavigationBar(
@@ -797,6 +1073,12 @@ class _MainShellState extends State<MainShell> {
                   selectedIcon: Icon(Icons.person_rounded, color: C.primary),
                   label: 'Akun',
                 ),
+                if (_isAdmin)
+                  const NavigationDestination(
+                    icon: Icon(Icons.map_outlined, color: C.muted),
+                    selectedIcon: Icon(Icons.map_rounded, color: C.primary),
+                    label: 'Pantau',
+                  ),
               ],
             ),
           ),
@@ -1380,7 +1662,7 @@ class _GpsPageState extends State<GpsPage> {
     });
     try {
       final d = await Api.get('/trucking/$id');
-      final segs = _splitSegments((d['points'] as List?) ?? []);
+      final segs = splitTrackSegments((d['points'] as List?) ?? []);
       final exps = ((d['expenses'] as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList();
       if (mounted && _loadedTripId == id) {
         setState(() {
@@ -1394,35 +1676,6 @@ class _GpsPageState extends State<GpsPage> {
     if (_loadedTripId != id) return;
     await _computeRoute();
     _fitAll();
-  }
-
-  /// Pecah titik GPS jadi beberapa segmen. Titik yang terpisah jauh (>1 km)
-  /// atau jeda waktu lama (>5 menit, mis. GPS dimatikan) tidak disambung
-  /// dengan garis lurus.
-  List<List<LatLng>> _splitSegments(List raw) {
-    const dist = Distance();
-    final segs = <List<LatLng>>[];
-    var cur = <LatLng>[];
-    LatLng? prev;
-    int? prevTs;
-    for (final r in raw) {
-      if (r is! Map || r['lat'] == null || r['lng'] == null) continue;
-      final p = LatLng((r['lat'] as num).toDouble(), (r['lng'] as num).toDouble());
-      final ts = (r['ts'] as num?)?.toInt();
-      if (prev != null) {
-        final gapM = dist.distance(prev, p);
-        final gapS = (ts != null && prevTs != null) ? ts - prevTs : 0;
-        if (gapM > 1000 || gapS > 300) {
-          if (cur.length > 1) segs.add(cur);
-          cur = <LatLng>[];
-        }
-      }
-      cur.add(p);
-      prev = p;
-      prevTs = ts;
-    }
-    if (cur.length > 1) segs.add(cur);
-    return segs;
   }
 
   Future<LatLng?> _oneShotPosition() async {
@@ -1567,7 +1820,7 @@ class _GpsPageState extends State<GpsPage> {
     if (err != null) {
       snack(context, err, color: C.red);
     } else {
-      snack(context, 'GPS aktif. Lokasi dikirim otomatis tiap 15 detik.', color: C.green);
+      snack(context, 'GPS aktif. Lokasi tetap direkam walau Anda buka WA / Maps.', color: C.green);
       _computeRoute();
     }
   }
@@ -1583,6 +1836,7 @@ class _GpsPageState extends State<GpsPage> {
     );
     if (!ok) return;
     setState(() => _busy = true);
+    await Tracker.I.flushNow();
     try {
       final p = Tracker.I.position ?? await Geolocator.getLastKnownPosition();
       final body = <String, dynamic>{};
@@ -2407,11 +2661,14 @@ class _GpsPageState extends State<GpsPage> {
           GpsPill(active: trackingThis),
           const Spacer(),
           if (trackingThis) ...[
-            Icon(tracker.failed > 0 ? Icons.sync_problem_rounded : Icons.cloud_done_rounded,
-                size: 16, color: tracker.failed > 0 ? C.red : C.green),
+            Icon(tracker.failed > 0 ? Icons.cloud_queue_rounded : Icons.cloud_done_rounded,
+                size: 16, color: tracker.failed > 0 ? C.accent : C.green),
             const SizedBox(width: 4),
-            Text(tracker.failed > 0 ? 'Gagal kirim (${tracker.failed}x)' : 'Terkirim ${tracker.pings}x • ${tracker.lastSync}',
-                style: t(11.5, w: FontWeight.w700, c: tracker.failed > 0 ? C.red : C.muted)),
+            Text(
+                tracker.failed > 0
+                    ? 'Sinyal lemah • ${tracker.queued} titik disimpan'
+                    : 'Terkirim ${tracker.pings} titik • ${tracker.lastSync}',
+                style: t(11.5, w: FontWeight.w700, c: tracker.failed > 0 ? const Color(0xFFB45309) : C.muted)),
           ] else
             Text(_dest == null ? 'Mencari lokasi tujuan...' : 'Tujuan ditemukan', style: t(11.5, w: FontWeight.w600, c: C.muted)),
         ]),
@@ -2695,6 +2952,497 @@ class HistoryPageState extends State<HistoryPage> {
 }
 
 // ============================================================
+// 5. PANTAU ARMADA (khusus super-admin)
+// ============================================================
+class MonitorPage extends StatefulWidget {
+  const MonitorPage({super.key});
+
+  @override
+  State<MonitorPage> createState() => MonitorPageState();
+}
+
+class MonitorPageState extends State<MonitorPage> {
+  final MapController _map = MapController();
+  bool _mapReady = false;
+  bool _loading = true;
+  String? _error;
+  List<Map<String, dynamic>> _items = [];
+  Map<String, dynamic> _summary = {};
+  Map<String, dynamic>? _sel;
+  List<List<LatLng>> _segs = [];
+  LatLng? _dest;
+  bool _loadingRoute = false;
+  bool _showFinished = false;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+    _timer = Timer.periodic(const Duration(seconds: 20), (_) {
+      if (mounted) load(silent: true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  List<Map<String, dynamic>> get _visible =>
+      _showFinished ? _items : _items.where((e) => e['finished_at'] == null).toList();
+
+  Future<void> load({bool silent = false}) async {
+    if (!silent && _items.isEmpty) setState(() => _loading = true);
+    try {
+      final d = await Api.get('/monitor');
+      if (d['success'] != true) throw Exception(d['message'] ?? 'Gagal');
+      final list = ((d['truckings'] as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      if (!mounted) return;
+      final firstLoad = _items.isEmpty;
+      setState(() {
+        _items = list;
+        _summary = Map<String, dynamic>.from((d['summary'] as Map?) ?? {});
+        _loading = false;
+        _error = null;
+        if (_sel != null) {
+          final again = list.where((e) => e['id'] == _sel!['id']);
+          _sel = again.isNotEmpty ? again.first : _sel;
+        }
+      });
+      if (_sel != null) {
+        _loadRoute(_sel!, fit: false);
+      } else if (firstLoad) {
+        _fitFleet();
+      }
+    } on AuthExpired {
+      if (mounted) logoutAndExit(context);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Gagal memuat data armada. Cek koneksi internet.';
+      });
+    }
+  }
+
+  Future<void> _loadRoute(Map<String, dynamic> trip, {bool fit = true}) async {
+    final id = trip['id'];
+    if (fit) setState(() => _loadingRoute = true);
+    try {
+      final d = await Api.get('/trucking/$id');
+      if (!mounted || _sel == null || _sel!['id'] != id) return;
+      final dest = d['destination'] as Map?;
+      setState(() {
+        _segs = splitTrackSegments((d['points'] as List?) ?? []);
+        _dest = (dest != null && dest['lat'] != null && dest['lng'] != null)
+            ? LatLng((dest['lat'] as num).toDouble(), (dest['lng'] as num).toDouble())
+            : null;
+        _loadingRoute = false;
+      });
+      if (fit) _fitSelected();
+    } catch (_) {
+      if (mounted) setState(() => _loadingRoute = false);
+    }
+  }
+
+  void _select(Map<String, dynamic> trip) {
+    setState(() {
+      _sel = trip;
+      _segs = [];
+      _dest = null;
+    });
+    _loadRoute(trip);
+  }
+
+  void _clearSelection() {
+    setState(() {
+      _sel = null;
+      _segs = [];
+      _dest = null;
+    });
+    _fitFleet();
+  }
+
+  LatLng? _pos(Map e) {
+    final l = e['latest'] as Map?;
+    if (l == null || l['lat'] == null) return null;
+    return LatLng((l['lat'] as num).toDouble(), (l['lng'] as num).toDouble());
+  }
+
+  void _fitPoints(List<LatLng> pts, {double bottom = 300}) {
+    if (!_mapReady || pts.isEmpty) return;
+    if (pts.length == 1) {
+      _map.move(pts.first, 15);
+      return;
+    }
+    _map.fitCamera(CameraFit.bounds(
+      bounds: LatLngBounds.fromPoints(pts),
+      padding: EdgeInsets.fromLTRB(40, 150, 40, bottom),
+      maxZoom: 16,
+    ));
+  }
+
+  void _fitFleet() {
+    _fitPoints([for (final e in _visible) if (_pos(e) != null) _pos(e)!]);
+  }
+
+  void _fitSelected() {
+    final s = _sel;
+    if (s == null) return;
+    final me = _pos(s);
+    _fitPoints([if (me != null) me, if (_dest != null) _dest!, for (final seg in _segs) ...seg], bottom: 280);
+  }
+
+  Color _color(Map e) {
+    if (e['finished_at'] != null) return C.navy2;
+    return e['online'] == true ? C.green : C.muted;
+  }
+
+  String _statusText(Map e) {
+    if (e['finished_at'] != null) return 'SELESAI';
+    return e['online'] == true ? 'ONLINE' : 'OFFLINE';
+  }
+
+  Future<void> _call(String? phone) async {
+    if (phone == null || phone.isEmpty) return;
+    var n = phone.replaceAll(RegExp(r'[^0-9]'), '');
+    if (n.startsWith('0')) n = '62${n.substring(1)}';
+    try {
+      await launchUrl(Uri.parse('https://wa.me/$n'), mode: LaunchMode.externalApplication);
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final top = MediaQuery.of(context).padding.top;
+    final visible = _visible;
+    final sel = _sel;
+
+    return Scaffold(
+      body: Stack(children: [
+        FlutterMap(
+          mapController: _map,
+          options: MapOptions(
+            initialCenter: const LatLng(-6.2, 106.8166),
+            initialZoom: 11,
+            onMapReady: () {
+              _mapReady = true;
+              _fitFleet();
+            },
+          ),
+          children: [
+            TileLayer(
+              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              userAgentPackageName: 'com.precision.trucking_mobile',
+            ),
+            if (sel != null)
+              PolylineLayer(polylines: [
+                for (final seg in _segs)
+                  Polyline(points: seg, strokeWidth: 5, color: C.primary, borderStrokeWidth: 1.5, borderColor: Colors.white),
+              ]),
+            MarkerLayer(markers: [
+              if (sel != null && _dest != null)
+                Marker(
+                  point: _dest!,
+                  width: 46,
+                  height: 46,
+                  alignment: Alignment.topCenter,
+                  child: const Icon(Icons.location_on_rounded, color: C.red, size: 46),
+                ),
+              for (final e in visible)
+                if (_pos(e) != null && (sel == null || sel['id'] == e['id']))
+                  Marker(
+                    point: _pos(e)!,
+                    width: 130,
+                    height: 62,
+                    alignment: Alignment.center,
+                    child: GestureDetector(
+                      onTap: () => _select(e),
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(8),
+                            boxShadow: kShadow,
+                          ),
+                          child: Text('${e['driver'] ?? '-'}',
+                              maxLines: 1, overflow: TextOverflow.ellipsis, style: t(10.5, w: FontWeight.w800)),
+                        ),
+                        const SizedBox(height: 2),
+                        Container(
+                          width: 34,
+                          height: 34,
+                          decoration: BoxDecoration(
+                            color: _color(e),
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.white, width: 3),
+                            boxShadow: [BoxShadow(color: _color(e).withOpacity(0.4), blurRadius: 10, spreadRadius: 2)],
+                          ),
+                          child: const Icon(Icons.local_shipping_rounded, color: Colors.white, size: 17),
+                        ),
+                      ]),
+                    ),
+                  ),
+            ]),
+          ],
+        ),
+
+        // ATAS: ringkasan
+        Positioned(
+          top: top + 12,
+          left: 16,
+          right: 16,
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: kShadow),
+            child: Row(children: [
+              Container(
+                padding: const EdgeInsets.all(9),
+                decoration: BoxDecoration(color: C.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(12)),
+                child: const Icon(Icons.map_rounded, color: C.primary, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                  Text('Pantau Armada', style: t(14, w: FontWeight.w800)),
+                  Text(
+                    _loading
+                        ? 'Memuat...'
+                        : '${_summary['online'] ?? 0} online • ${(_summary['total'] ?? 0) - (_summary['finished'] ?? 0)} jalan • ${_summary['finished'] ?? 0} selesai hari ini',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: t(12, c: C.muted),
+                  ),
+                ]),
+              ),
+              IconButton(
+                tooltip: 'Muat ulang',
+                onPressed: () => load(),
+                icon: const Icon(Icons.refresh_rounded, color: C.primary),
+              ),
+            ]),
+          ),
+        ),
+
+        // BAWAH: daftar / detail
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: Container(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.42),
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+              boxShadow: [BoxShadow(color: Color(0x220F172A), blurRadius: 24, offset: Offset(0, -6))],
+            ),
+            child: sel != null ? _detail(sel) : _list(visible),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _list(List<Map<String, dynamic>> visible) {
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(18, 14, 10, 6),
+        child: Row(children: [
+          Text('Perjalanan', style: t(15, w: FontWeight.w800)),
+          const Spacer(),
+          FilterChip(
+            label: Text('Termasuk selesai', style: t(12, w: FontWeight.w700, c: _showFinished ? Colors.white : C.text)),
+            selected: _showFinished,
+            showCheckmark: false,
+            selectedColor: C.navy,
+            backgroundColor: Colors.white,
+            side: BorderSide(color: _showFinished ? C.navy : C.border),
+            onSelected: (v) {
+              setState(() => _showFinished = v);
+              _fitFleet();
+            },
+          ),
+        ]),
+      ),
+      if (_loading)
+        const Padding(padding: EdgeInsets.all(28), child: SpinKitThreeBounce(color: C.primary, size: 20))
+      else if (_error != null)
+        Padding(padding: const EdgeInsets.all(20), child: Text(_error!, style: t(13, c: C.red), textAlign: TextAlign.center))
+      else if (visible.isEmpty)
+        Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text('Tidak ada perjalanan aktif saat ini.', style: t(13, c: C.muted), textAlign: TextAlign.center),
+        )
+      else
+        Flexible(
+          child: ListView.separated(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
+            itemCount: visible.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 8),
+            itemBuilder: (_, i) {
+              final e = visible[i];
+              final l = e['latest'] as Map?;
+              return InkWell(
+                borderRadius: BorderRadius.circular(16),
+                onTap: () => _select(e),
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(borderRadius: BorderRadius.circular(16), border: Border.all(color: C.border)),
+                  child: Row(children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(color: _color(e).withOpacity(0.12), shape: BoxShape.circle),
+                      child: Icon(Icons.local_shipping_rounded, color: _color(e), size: 20),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('${e['driver'] ?? '-'} • ${e['nomor_polisi'] ?? '-'}',
+                            maxLines: 1, overflow: TextOverflow.ellipsis, style: t(13.5, w: FontWeight.w800)),
+                        Text('${e['nomor_surat_jalan'] ?? '-'} • ${e['consignee_name'] ?? '-'}',
+                            maxLines: 1, overflow: TextOverflow.ellipsis, style: t(11.5, c: C.muted)),
+                        Text(l == null ? 'Belum ada lokasi' : 'Lokasi terakhir ${l['ago']}',
+                            style: t(11, w: FontWeight.w600, c: C.muted)),
+                      ]),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(color: _color(e).withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
+                      child: Text(_statusText(e), style: t(10, w: FontWeight.w800, c: _color(e), ls: 0.4)),
+                    ),
+                  ]),
+                ),
+              );
+            },
+          ),
+        ),
+    ]);
+  }
+
+  Widget _detail(Map<String, dynamic> e) {
+    final l = e['latest'] as Map?;
+    final speed = (l?['speed'] as num?)?.toDouble();
+    final bat = (l?['battery'] as num?)?.toInt();
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          IconButton(
+            tooltip: 'Kembali ke daftar',
+            onPressed: _clearSelection,
+            icon: const Icon(Icons.arrow_back_rounded),
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('${e['driver'] ?? '-'}', style: t(16, w: FontWeight.w800)),
+              Text('${e['nomor_surat_jalan'] ?? '-'} • ${e['nomor_polisi'] ?? '-'}', style: t(12, c: C.muted)),
+            ]),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(color: _color(e).withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
+            child: Text(_statusText(e), style: t(10.5, w: FontWeight.w800, c: _color(e), ls: 0.4)),
+          ),
+        ]),
+        const SizedBox(height: 10),
+        Row(children: [
+          const Icon(Icons.place_rounded, size: 18, color: C.red),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text('${e['consignee_name'] ?? '-'}${(e['consignee_address'] ?? '').toString().isNotEmpty ? ' — ${e['consignee_address']}' : ''}',
+                maxLines: 2, overflow: TextOverflow.ellipsis, style: t(12.5, w: FontWeight.w600)),
+          ),
+        ]),
+        if (e['jenis'] == 'sales_visit' && (e['nama_sales'] ?? '').toString().isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Row(children: [
+            const Icon(Icons.badge_outlined, size: 18, color: C.primary),
+            const SizedBox(width: 6),
+            Text('Sales: ${e['nama_sales']}', style: t(12.5, w: FontWeight.w600)),
+          ]),
+        ],
+        const SizedBox(height: 12),
+        Row(children: [
+          _mini(Icons.speed_rounded, speed != null ? speed.toStringAsFixed(0) : '-', 'km/j'),
+          const SizedBox(width: 8),
+          _mini(Icons.battery_std_rounded, bat != null ? '$bat' : '-', '%'),
+          const SizedBox(width: 8),
+          _mini(Icons.schedule_rounded, l != null ? '${l['time']}' : '-', ''),
+        ]),
+        const SizedBox(height: 8),
+        Text(
+          _loadingRoute
+              ? 'Memuat rute...'
+              : (l == null ? 'Supir belum mengirim lokasi.' : 'Lokasi terakhir ${l['ago']} • garis biru = rute yang sudah dilalui'),
+          style: t(11.5, c: C.muted),
+        ),
+        const SizedBox(height: 12),
+        Row(children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _fitSelected,
+              icon: const Icon(Icons.zoom_out_map_rounded, size: 18),
+              label: Text('Lihat Rute', style: t(13, w: FontWeight.w800, c: C.primary)),
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size.fromHeight(48),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              ),
+            ),
+          ),
+          if ((e['driver_phone'] ?? '').toString().isNotEmpty) ...[
+            const SizedBox(width: 10),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: () => _call(e['driver_phone']?.toString()),
+                icon: const Icon(Icons.chat_rounded, size: 18),
+                label: Text('WA Supir', style: t(13, w: FontWeight.w800, c: Colors.white)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: C.green,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  minimumSize: const Size.fromHeight(48),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+              ),
+            ),
+          ],
+        ]),
+      ]),
+    );
+  }
+
+  Widget _mini(IconData icon, String value, String unit) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+        decoration: BoxDecoration(color: C.bg, borderRadius: BorderRadius.circular(14)),
+        child: Row(children: [
+          Icon(icon, size: 18, color: C.navy2),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text.rich(
+              TextSpan(children: [
+                TextSpan(text: value, style: t(15, w: FontWeight.w800)),
+                if (unit.isNotEmpty) TextSpan(text: ' $unit', style: t(11, c: C.muted)),
+              ]),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+// ============================================================
 // 4. AKUN
 // ============================================================
 class ProfilePage extends StatefulWidget {
@@ -2706,6 +3454,7 @@ class ProfilePage extends StatefulWidget {
 
 class _ProfilePageState extends State<ProfilePage> {
   String _name = '-', _username = '-', _phone = '-', _email = '-';
+  bool _admin = false;
 
   @override
   void initState() {
@@ -2722,6 +3471,7 @@ class _ProfilePageState extends State<ProfilePage> {
         _username = v('user_username');
         _phone = v('user_phone');
         _email = v('user_email');
+        _admin = p.getBool('is_admin') ?? false;
       });
     });
   }
@@ -2786,7 +3536,7 @@ class _ProfilePageState extends State<ProfilePage> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
             decoration: BoxDecoration(color: Colors.white.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
-            child: Text('Supir • @$_username', style: t(12, w: FontWeight.w700, c: Colors.white70)),
+            child: Text('${_admin ? 'Admin' : 'Supir'} • @$_username', style: t(12, w: FontWeight.w700, c: Colors.white70)),
           ),
         ]),
       ),
@@ -2802,6 +3552,33 @@ class _ProfilePageState extends State<ProfilePage> {
               _row(Icons.alternate_email_rounded, 'Email', _email),
               const Divider(color: C.border, height: 1),
               _row(Icons.info_outline_rounded, 'Versi Aplikasi', '$kAppVersion (Build $kAppVersionCode)'),
+              const Divider(color: C.border, height: 1),
+              InkWell(
+                onTap: () async {
+                  try {
+                    await ph.Permission.ignoreBatteryOptimizations.request();
+                  } catch (_) {}
+                  await ph.openAppSettings();
+                },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Row(children: [
+                    Container(
+                      padding: const EdgeInsets.all(9),
+                      decoration: BoxDecoration(color: C.green.withOpacity(0.12), borderRadius: BorderRadius.circular(12)),
+                      child: const Icon(Icons.battery_saver_rounded, size: 20, color: C.green),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('Agar GPS tidak mati', style: t(11.5, w: FontWeight.w600, c: C.muted)),
+                        Text('Atur Baterai: Tidak Dibatasi', style: t(14, w: FontWeight.w700, c: C.green)),
+                      ]),
+                    ),
+                    const Icon(Icons.chevron_right_rounded, color: C.muted),
+                  ]),
+                ),
+              ),
               const Divider(color: C.border, height: 1),
               InkWell(
                 onTap: () async {
@@ -2864,8 +3641,9 @@ class _ProfilePageState extends State<ProfilePage> {
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
-                  'Tips: Saat GPS aktif, jangan tutup aplikasi dari daftar aplikasi terbaru. '
-                  'Matikan mode hemat baterai untuk aplikasi ini agar lokasi tetap terkirim.',
+                  'Tips: Saat GPS aktif, boleh buka WA / Maps, lokasi tetap direkam. '
+                  'Jangan tutup aplikasi dari daftar aplikasi terbaru, dan atur Baterai aplikasi ini ke "Tidak dibatasi". '
+                  'Di Xiaomi / Oppo / Vivo aktifkan juga "Mulai otomatis".',
                   style: t(12.5, w: FontWeight.w600, c: const Color(0xFF92400E), h: 1.45),
                 ),
               ),
